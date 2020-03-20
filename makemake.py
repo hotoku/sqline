@@ -42,7 +42,7 @@ class TokenSeq:
         for t in self._tokens:
             space_before = " " * t.depth * 3
             space_after = " " * (max_len - len(t.value) -
-                                 len(space_before) + 3)
+                                 len(space_before) + 10)
             ret.append(
                 f"{space_before}{t.value}{space_after}{t.ttype}")
         return "\n".join(ret)
