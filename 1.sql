@@ -64,3 +64,32 @@ select
   *
 from
   `proj.ds.table6`, `proj.ds.table7`
+;
+
+-- create文
+create or replace table `proj.ds.table8` as
+select
+  *
+from
+  `proj.ds.table9`
+;
+
+-- craete + 複数のwith
+create or replace table `proj.ds.table9` as
+with temp1 as (
+select
+  *
+from
+  `proj.ds.table10`
+),
+temp2 as (
+select
+  *
+from
+  `proj.ds.table11`
+)
+select
+  *
+from
+  temp1, temp2
+;
