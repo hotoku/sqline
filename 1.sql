@@ -93,3 +93,7 @@ select
 from
   temp1, temp2
 ;
+
+-- select + from
+select a, b, c from hoge
+;

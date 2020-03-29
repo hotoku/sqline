@@ -61,7 +61,7 @@ class TableExtractor:
 
 
 def main():
-    with open("1.sql") as f:
+    with open("2.sql") as f:
         sql = "\n".join(f.readlines())
 
     tex = TableExtractor()
