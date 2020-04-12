@@ -3,7 +3,6 @@
 
 import functools as ft
 import argparse
-import examples as ex
 import sqlparse as sp
 from sqlparse.tokens import Whitespace, Newline, Keyword, Name, Punctuation, DDL
 from sqlparse.sql import TokenList, Comment
@@ -115,7 +114,8 @@ def parse(sql):
         t, s = analyze_statement(s)
         targets += t
         sources += s
-    return targets, sources
+    sources2 = list(set(sources))
+    return targets, sources2
 
 
 class Dependency:
