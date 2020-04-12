@@ -7,6 +7,7 @@ import examples as ex
 import sqlparse as sp
 from sqlparse.tokens import Whitespace, Newline, Keyword, Name, Punctuation
 from sqlparse.sql import TokenList, Comment
+from glob import glob
 
 
 def flatten(lss):
@@ -107,7 +108,7 @@ def semicolon(tokens):
         raise UnexpectedToken(";", token.value, tokens)
 
 
-def word(val, ttype):
+def term(val, ttype):
     def ret(tokens):
         token = tokens[0]
         if token.ttype is ttype and token.value.upper() == val.upper():
@@ -117,78 +118,86 @@ def word(val, ttype):
     return ret
 
 
-def where(tokens):
-    ret = word("where", Keyword)(tokens)
-    nx = tokens[ret]
-    while nx.ttype is not Keyword and not nx.value == ";" and ret < len(tokens):
-        ret += 1
-        nx = tokens[ret]
-    return ret
+create_term = term("CREATE", Keyword)
+or_term = term("OR", Keyword)
+replace_term = term("REPLACE", Keyword)
+table_term = term("TABLE", Keyword)
+as_term = term("AS", Keyword)
+open_paren = term("(", Punctuation)
+close_paren = term(")", Punctuation)
+select_term = term("SELECT", Keyword)
 
 
-def groupby(tokens):
-    t = tokens[0]
-    if not (t.ttype is Keyword and t.value.upper().replace(" ", "") == "GROUPBY"):
-        raise UnexpectedToken("group by", t.value, tokens)
-    ret = 1
-    ret += column_list(tokens[ret:])
-    return ret
-
-
-def orderby(tokens):
-    t = tokens[0]
-    if not (t.ttype is Keyword and t.value.upper().replace(" ", "") == "ORDERBY"):
-        raise UnexpectedToken("order by", t.value, tokens)
-    ret = 1
-    ret += column_list(tokens[ret:])
-    return ret
-
-
-def query(tokens):
-    pos = 0
-    pos += word("select", Keyword.DML)(tokens[pos:])
-    pos += anything_but_from(tokens[pos:])
-    pos += word("from", Keyword)(tokens[pos:])
-    pos += table_name(tokens[pos:])
-    nx = tokens[pos]
-    if nx.ttype is Keyword and nx.value.upper() == "WHERE":
-        pos += where(tokens[pos:])
-    nx = tokens[pos]
-    if nx.ttype is Keyword and nx.value.upper().replace(" ", "") == "GROUPBY":
-        pos += groupby(tokens[pos:])
-    nx = tokens[pos]
-    if nx.ttype is Keyword and nx.value.upper().replace(" ", "") == "ORDERBY":
-        pos += orderby(tokens[pos:])
-    return pos
-
-
-def statement(tokens):
-    pos = query(tokens)
-    if pos < len(tokens):
-        pos += semicolon(tokens[pos:])
-    if pos == len(tokens):
-        return True
+def table_name(tokens, ls):
+    token = tokens[0]
+    if token.ttype is Name:
+        ls.append(token.value().replace("`", ""))
+        return 1
     else:
-        raise NotComsumedTokenRemains(
-            "parse finished but not consumed terms remain")
+        raise UnexpectedToken("TABLE NAME", token.value, tokens)
 
 
-def main():
-    with open("2.sql") as f:
-        sql = "\n".join(f.readlines())
+def create_sentence(tokens, targets, sources):
+    pos = 0
+    pos += create_term(tokens)
+    if tokens[pos].value.upper() == "OR":
+        pos += or_term(tokens[pos:])
+        pos += replace_term(tokens[pos:])
+    pos += table_term(tokens[pos:], targets)
+    pos += as_term(tokens[pos:])
+    gather_sources(tokens, sources)
+    return targets, sources
 
+
+def gather_sources(tokens, sources):
+    for t in tokens:
+        m = re.match("`(.+)`", t.value())
+        if m:
+            sources.append(m[1])
+
+
+def analyze_statement(st):
+    tokens = [t for t in extarct(st)]
+    sources, targets = [], []
+    if tokens[0].value.upper() == "CREATE":
+        create_sentence(tokens, targets, sources)
+    else:
+        gather_sources(tokens, sources)
+    return targets, sources
+
+
+def parse(sql):
+    targets = []
+    sources = []
     statements = sp.parse(sql)
-    for st in statements:
-        if str(st).strip() == "":
-            continue
-        print(st)
-        tokens = [t for t in extract(st)]
-        try:
-            ret = statement(tokens)
-            print("parse succeeded")
-        except ParseError as e:
-            print(e)
+    for s in statements:
+        t, s = analyze_statement(s)
+        targets += t
+        sources += s
+    return targets, sources
+
+
+def main(args):
+    fnames = glob("*.sql")
+    targets = []
+    sources = []
+    for fname in fnames:
+        with open(fname) as f:
+            sql = "\n".join(f.readlines())
+        t, s = parse(sql)
+        targets += t
+        sources += s
+    create_makefile(targets, sources)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        filename="parse.log",
+        level=logging.DEBUG,
+        format="[%(levelname)s]%(asctime)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    main(args)
