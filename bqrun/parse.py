@@ -10,6 +10,7 @@ from glob import glob
 from io import StringIO
 import logging
 import re
+import subprocess
 
 
 def flatten(lss):
@@ -118,6 +119,10 @@ def parse(sql):
     return targets, sources2
 
 
+def done(f):
+    return "done." + re.sub(r"(.*).sql$", r"\1", f)
+
+
 class Dependency:
     def __init__(self, t, s, f):
         self.targets = t
@@ -132,8 +137,10 @@ class Dependency:
         return """{target}: {sources}
 \tcat {file} | bq query
 \ttouch $@
-""".format(target="done." + self.file,
-           sources=" ".join(set(["done." + s2f[s] for s in self.sources])),
+""".format(target=done(self.file),
+           sources=self.file + " " + " ".join(
+               set([done(s2f[s])
+                    for s in self.sources])),
            file=self.file)
 
 
@@ -159,7 +166,7 @@ def create_makefile(ds):
 
 all: {}
 
-""".format(" ".join(["done." + d.file for d in ds2])))
+""".format(" ".join([done(d.file) for d in ds2])))
         f.write("\n".join([
             d.rule(s2f) for d in ds2
         ]))
@@ -174,10 +181,13 @@ def main(args):
         t, s = parse(sql)
         dependencies.append(Dependency(t, s, fname))
     create_makefile(dependencies)
+    cmd = ["make", "-j", str(args.parallel)]
+    subprocess.run(cmd)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--parallel", default=8)
     args = parser.parse_args()
 
     logging.basicConfig(
