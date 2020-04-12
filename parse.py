@@ -5,22 +5,23 @@ import functools as ft
 import argparse
 import examples as ex
 import sqlparse as sp
-from sqlparse.tokens import Whitespace, Newline, Keyword, Name, Punctuation
+from sqlparse.tokens import Whitespace, Newline, Keyword, Name, Punctuation, DDL
 from sqlparse.sql import TokenList, Comment
 from glob import glob
+from io import StringIO
+import logging
+import re
 
 
 def flatten(lss):
-    ft.reduce(lambda x, y: x+y, list(lss))
+    return ft.reduce(lambda x, y: x+y, list(lss))
 
 
 def is_neligible(token):
-    # print("===", token.value, token.ttype is Whitespace, token.ttype is Newline)
-    return (token.ttype is Whitespace) or (token.ttype is Newline) or (token.ttype is None and isinstance(token, Comment))
-
-
-def myprint(x, d):
-    print(" " * 3 * d + str(x))
+    return (token.ttype is Whitespace) or \
+        (token.ttype is Newline) or \
+        (token.ttype is None and isinstance(token, Comment)) or \
+        (token.ttype is Name and token.value == "#standardSQL")
 
 
 def extract(tokens):
@@ -42,72 +43,6 @@ class UnexpectedToken(ParseError):
             f"expected {exp} but got {got}:\n{' '.join([t.value for t in tokens])}")
 
 
-class NotComsumedTokenRemains(ParseError):
-    pass
-
-
-def select(tokens):
-    token = tokens[0]
-    if token.ttype is Keyword.DML and token.value.upper() == "SELECT":
-        return 1
-    else:
-        raise UnexpectedToken("SELECT", token.value, tokens)
-
-
-def name(tokens):
-    token = tokens[0]
-    if token.ttype is not Name:
-        raise UnexpectedToken("<Name>", token.value, tokens)
-    return 1
-
-
-def column_select(tokens):
-    ret = name(tokens)
-    nx = tokens[ret]
-    if nx.ttype is Punctuation and nx.value == ".":
-        ret += 1
-        ret += name(tokens[ret:])
-    return ret
-
-
-def column_list(tokens):
-    ret = column_select(tokens)
-    nx = tokens[ret]
-    if nx.ttype is Punctuation and nx.value == ",":
-        ret += 1
-        ret += column_list(tokens[ret:])
-    return ret
-
-
-def anything_but_from(tokens):
-    ret = 0
-    nx = tokens[ret]
-    while not (nx.ttype is Keyword and nx.value.upper() == "FROM"):
-        ret += 1
-        nx = tokens[ret]
-    return ret
-
-
-def from_(tokens):
-    token = tokens[0]
-    if token.ttype is Keyword and token.value.upper() == "FROM":
-        return 1
-    else:
-        raise UnexpectedToken("FROM", token.value, tokens)
-
-
-def table_name(tokens):
-    return name(tokens)
-
-
-def semicolon(tokens):
-    token = tokens[0]
-    if token.ttype is Punctuation and token.value == ";":
-        return 1
-    else:
-        raise UnexpectedToken(";", token.value, tokens)
-
-
 def term(val, ttype):
     def ret(tokens):
         token = tokens[0]
@@ -118,20 +53,23 @@ def term(val, ttype):
     return ret
 
 
-create_term = term("CREATE", Keyword)
-or_term = term("OR", Keyword)
-replace_term = term("REPLACE", Keyword)
+create_term = term("CREATE", DDL)
 table_term = term("TABLE", Keyword)
 as_term = term("AS", Keyword)
-open_paren = term("(", Punctuation)
-close_paren = term(")", Punctuation)
-select_term = term("SELECT", Keyword)
+
+
+def create_or_replace_term(tokens):
+    token = tokens[0]
+    if token.ttype is DDL and re.match(r"CREATE +OR +REPLACE", token.value.upper()):
+        return 1
+    else:
+        raise UnexpectedToken("CREATE OR REPLACE", token.value, tokens)
 
 
 def table_name(tokens, ls):
     token = tokens[0]
     if token.ttype is Name:
-        ls.append(token.value().replace("`", ""))
+        ls.append(token.value.replace("`", ""))
         return 1
     else:
         raise UnexpectedToken("TABLE NAME", token.value, tokens)
@@ -139,27 +77,30 @@ def table_name(tokens, ls):
 
 def create_sentence(tokens, targets, sources):
     pos = 0
-    pos += create_term(tokens)
-    if tokens[pos].value.upper() == "OR":
-        pos += or_term(tokens[pos:])
-        pos += replace_term(tokens[pos:])
-    pos += table_term(tokens[pos:], targets)
+    if tokens[pos].value.upper() == "CREATE":
+        pos += create_term(tokens)
+    else:
+        pos += create_or_replace_term(tokens)
+    pos += table_term(tokens[pos:])
+    pos += table_name(tokens[pos:], targets)
     pos += as_term(tokens[pos:])
-    gather_sources(tokens, sources)
+    gather_sources(tokens[pos:], sources)
     return targets, sources
 
 
 def gather_sources(tokens, sources):
     for t in tokens:
-        m = re.match("`(.+)`", t.value())
+        m = re.match("`(.+)`", t.value)
         if m:
             sources.append(m[1])
 
 
 def analyze_statement(st):
-    tokens = [t for t in extarct(st)]
+    tokens = [t for t in extract(st)]
     sources, targets = [], []
-    if tokens[0].value.upper() == "CREATE":
+    if len(tokens) == 0:
+        return sources, targets
+    if re.match("CREATE.*", tokens[0].value.upper()):
         create_sentence(tokens, targets, sources)
     else:
         gather_sources(tokens, sources)
@@ -177,17 +118,62 @@ def parse(sql):
     return targets, sources
 
 
+class Dependency:
+    def __init__(self, t, s, f):
+        self.targets = t
+        self.sources = s
+        self.file = f
+
+    def filter(self, targets):
+        s = [s for s in self.sources if s in targets]
+        return Dependency(self.targets, s, self.file)
+
+    def rule(self, s2f):
+        return """{target}: {sources}
+\tcat {file} | bq query
+\ttouch $@
+""".format(target="done." + self.file,
+           sources=" ".join(set(["done." + s2f[s] for s in self.sources])),
+           file=self.file)
+
+
+def create_makefile(ds):
+    targets = flatten([d.targets for d in ds])
+    if len(targets) != len(set(targets)):
+        raise RuntimeError(
+            f"some targets are defined in multiple files: {targets}")
+    ds2 = [d.filter(targets) for d in ds]
+    sources = flatten([d.sources for d in ds])
+
+    def search(s):
+        for d in ds2:
+            if s in d.targets:
+                return d.file
+    s2f = {
+        s: search(s)
+        for s in sources
+    }
+
+    with open("Makefile", "w") as f:
+        f.write(""".PHONY: all
+
+all: {}
+
+""".format(" ".join(["done." + d.file for d in ds2])))
+        f.write("\n".join([
+            d.rule(s2f) for d in ds2
+        ]))
+
+
 def main(args):
     fnames = glob("*.sql")
-    targets = []
-    sources = []
+    dependencies = []
     for fname in fnames:
         with open(fname) as f:
             sql = "\n".join(f.readlines())
         t, s = parse(sql)
-        targets += t
-        sources += s
-    create_makefile(targets, sources)
+        dependencies.append(Dependency(t, s, fname))
+    create_makefile(dependencies)
 
 
 if __name__ == "__main__":
